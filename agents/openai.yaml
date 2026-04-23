@@ -1,0 +1,4 @@
+version: 1
+display_name: Keyword Research Harvest
+short_description: Search scholarly APIs for any keyword set, download accessible full texts, and deduplicate the results.
+default_prompt: Run a new keyword-driven research-article harvest in my local project, save downloads into a new run folder, then continue downloads, try HTML-to-PDF second pass, and deduplicate the saved files.

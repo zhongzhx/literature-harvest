@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+Thumbs.db
+
+# Generated run outputs
+downloaded_pdfs/
+downloaded_pdfs_deduplicated/
+download_logs/
+raw_api_results/
+merged_tables/
+reports/
+
+# Local configs and overrides
+*.local.json
+*.local.yaml
+*.local.yml

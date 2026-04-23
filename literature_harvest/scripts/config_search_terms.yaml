@@ -1,0 +1,71 @@
+{
+  "tool_name": "aspergillus_literature_harvest",
+  "email": "",
+  "lookback_days": 90,
+  "project_dedup": {
+    "enabled": true,
+    "reference_files": [
+      {
+        "path": "../../aspergillus_literature_dataset_merged.csv",
+        "doi_columns": ["DOI"],
+        "title_columns": ["Title"]
+      }
+    ]
+  },
+  "sources": {
+    "pubmed": true,
+    "pmc": true,
+    "europepmc": true,
+    "crossref": true,
+    "openalex": true
+  },
+  "max_results_per_query": {
+    "pubmed": 100,
+    "pmc": 100,
+    "europepmc": 100,
+    "crossref": 100,
+    "openalex": 100
+  },
+  "page_size": {
+    "europepmc": 100,
+    "crossref": 100,
+    "openalex": 100
+  },
+  "delay_seconds": {
+    "pubmed": 0.34,
+    "pmc": 0.34,
+    "europepmc": 0.34,
+    "crossref": 0.5,
+    "openalex": 0.34,
+    "download": 0.25
+  },
+  "download": {
+    "enabled": true,
+    "priority_levels": ["high", "medium"],
+    "timeout_seconds": 45,
+    "max_attempts_per_record": 2
+  },
+  "queries": [
+    {"name": "aspergillus_alkaloid", "query": "Aspergillus AND alkaloid"},
+    {"name": "aspergillus_indole_alkaloid", "query": "Aspergillus AND \"indole alkaloid\""},
+    {"name": "aspergillus_diketopiperazine", "query": "Aspergillus AND diketopiperazine"},
+    {"name": "aspergillus_prenylated_indole", "query": "Aspergillus AND \"prenylated indole\""},
+    {"name": "aspergillus_cytochalasan", "query": "Aspergillus AND cytochalasan"},
+    {"name": "aspergillus_meroterpenoid", "query": "Aspergillus AND meroterpenoid"},
+    {"name": "aspergillus_polyketide", "query": "Aspergillus AND polyketide"},
+    {"name": "aspergillus_terpenoid", "query": "Aspergillus AND terpenoid"},
+    {"name": "aspergillus_genome_mining", "query": "Aspergillus AND \"genome mining\""},
+    {"name": "aspergillus_biosynthesis", "query": "Aspergillus AND biosynthesis"},
+    {"name": "aspergillus_bgc", "query": "Aspergillus AND \"biosynthetic gene cluster\""},
+    {"name": "aspergillus_antismash", "query": "Aspergillus AND antiSMASH"},
+    {"name": "aspergillus_heterologous_expression", "query": "Aspergillus AND \"heterologous expression\""},
+    {"name": "aspergillus_marine", "query": "Aspergillus AND marine"},
+    {"name": "aspergillus_sponge", "query": "Aspergillus AND sponge-derived"},
+    {"name": "aspergillus_endophytic", "query": "Aspergillus AND endophytic"},
+    {"name": "aspergillus_antarctic", "query": "Aspergillus AND Antarctic"},
+    {"name": "aspergillus_coculture", "query": "Aspergillus AND coculture"},
+    {"name": "aspergillus_osmac", "query": "Aspergillus AND OSMAC"},
+    {"name": "aspergillus_molecular_networking", "query": "Aspergillus AND \"molecular networking\""},
+    {"name": "aspergillus_gnps", "query": "Aspergillus AND GNPS"}
+  ]
+}
