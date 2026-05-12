@@ -29,6 +29,16 @@ PAYWALL_MARKERS = [
 ]
 
 
+def _safe_read_csv(path: Path) -> pd.DataFrame:
+    """Read a CSV, returning empty DataFrame if file is empty or corrupt."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return pd.DataFrame()
+
+
 def clean_text(value: Any) -> str:
     if value is None:
         return ""
@@ -130,7 +140,8 @@ def candidate_urls(row: pd.Series) -> list[str]:
     return unique
 
 
-def request_row_download(row: pd.Series, pdf_dir: Path, timeout: int, max_attempts: int) -> dict[str, Any]:
+def request_row_download(row: pd.Series, pdf_dir: Path, timeout: int, max_attempts: int,
+                         institutional_resolver: Any = None) -> dict[str, Any]:
     stem = clean_text(row.get("record_id"))
     status = "metadata_only"
     reason = "no_candidate_url"
@@ -178,13 +189,45 @@ def request_row_download(row: pd.Series, pdf_dir: Path, timeout: int, max_attemp
             continue
         finally:
             time.sleep(0.15)
+
+    # ── Institutional resolver fallback ──────────────────────────
+    if status != "success" and institutional_resolver is not None:
+        doi = normalize_doi(row.get("doi"))
+        if doi:
+            resolve_result = institutional_resolver.resolve(doi, {"title": row.get("title")})
+            if resolve_result.selected_pdf_url and resolve_result.status in (
+                "oa_pdf_downloaded", "institution_pdf_downloaded",
+            ):
+                try:
+                    dl_resp = request_url(resolve_result.selected_pdf_url, timeout)
+                    if dl_resp["payload"].startswith(b"%PDF"):
+                        output = pdf_dir / f"{stem}_institutional.pdf"
+                        output.write_bytes(dl_resp["payload"])
+                        status = "institution_pdf_downloaded"
+                        reason = "institutional_resolver"
+                        final_path = str(output)
+                        final_url = resolve_result.selected_pdf_url
+                        content_format = "pdf"
+                except Exception:
+                    pass
+
+    # ── Map legacy status to DownloadStatus ──────────────────────
+    download_status = status
+    if status == "success":
+        download_status = "oa_pdf_downloaded" if content_format == "pdf" else (
+            "html_saved" if content_format == "html" else "xml_saved")
+    elif status == "inaccessible":
+        download_status = "paywall_detected_no_entitlement"
+    elif status == "broken_link":
+        download_status = "broken_link"
+
     return {
         "record_id": row.get("record_id"),
         "doi": row.get("doi"),
         "title": row.get("title"),
         "final_pdf_path": final_path,
         "final_pdf_url": final_url,
-        "download_status": status,
+        "download_status": download_status,
         "failure_reason": reason,
         "content_format": content_format,
         "attempt_count": attempts,
@@ -228,6 +271,14 @@ def main() -> None:
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--timeout", type=int, default=35)
     parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--institutional", action="store_true",
+                        help="Enable institutional resolver fallback for non-OA papers")
+    parser.add_argument("--browser-assisted", action="store_true",
+                        help="Enable Playwright browser-assisted download")
+    parser.add_argument("--browser-profile-dir", default=None,
+                        help="Path to persistent browser profile directory")
+    parser.add_argument("--publisher-delay", type=float, default=1.0,
+                        help="Delay between publisher requests (seconds)")
     args = parser.parse_args()
 
     run_root = Path(args.run_root).resolve()
@@ -244,22 +295,36 @@ def main() -> None:
     dedup_dir.mkdir(parents=True, exist_ok=True)
 
     candidate_df = pd.read_csv(candidate_path)
-    log_df = pd.read_csv(log_path) if log_path.exists() else pd.DataFrame()
-    success_ids = set(log_df.loc[log_df.get("download_status", pd.Series(dtype=str)).eq("success"), "record_id"].astype(str)) if not log_df.empty else set()
-    processed_ids = set(log_df.get("record_id", pd.Series(dtype=str)).astype(str)) if not log_df.empty else set()
+    log_df = _safe_read_csv(log_path)
+    success_ids: set[str] = set()
+    processed_ids: set[str] = set()
+    if not log_df.empty and "record_id" in log_df.columns:
+        if "download_status" in log_df.columns:
+            success_ids = set(log_df.loc[log_df["download_status"].eq("success"), "record_id"].astype(str))
+        processed_ids = set(log_df["record_id"].astype(str))
 
     if args.retry_failed:
         target = candidate_df.loc[candidate_df["exclusion_reason_if_any"].fillna("").eq("") & ~candidate_df["record_id"].astype(str).isin(success_ids)].copy()
     else:
         target = candidate_df.loc[candidate_df["exclusion_reason_if_any"].fillna("").eq("") & ~candidate_df["record_id"].astype(str).isin(processed_ids)].copy()
 
+    # Initialize institutional resolver if enabled
+    _resolver = None
+    if args.institutional:
+        try:
+            from literature_harvest.institutional_resolver import InstitutionalResolver  # noqa: WPS433
+            _resolver = InstitutionalResolver(timeout=args.timeout, delay=args.publisher_delay)
+        except ImportError:
+            print("Warning: literature_harvest package not found; institutional resolver disabled")
+
     rows: list[dict[str, Any]] = []
     for idx, (_, row) in enumerate(target.iterrows(), start=1):
-        rows.append(request_row_download(row, pdf_dir, args.timeout, args.max_attempts))
+        rows.append(request_row_download(row, pdf_dir, args.timeout, args.max_attempts,
+                                          institutional_resolver=_resolver))
         if idx % 50 == 0:
             chunk = pd.DataFrame(rows)
             if log_path.exists():
-                out = pd.concat([pd.read_csv(log_path), chunk], ignore_index=True)
+                out = pd.concat([_safe_read_csv(log_path), chunk], ignore_index=True)
             else:
                 out = chunk
             out = out.drop_duplicates(subset=["record_id"], keep="last")
@@ -267,7 +332,7 @@ def main() -> None:
             rows = []
     if rows:
         if log_path.exists():
-            out = pd.concat([pd.read_csv(log_path), pd.DataFrame(rows)], ignore_index=True)
+            out = pd.concat([_safe_read_csv(log_path), pd.DataFrame(rows)], ignore_index=True)
         else:
             out = pd.DataFrame(rows)
         out = out.drop_duplicates(subset=["record_id"], keep="last")
@@ -276,7 +341,10 @@ def main() -> None:
     # HTML second pass
     second_rows: list[dict[str, Any]] = []
     html_files = [p for p in pdf_dir.iterdir() if p.is_file() and p.suffix.lower() in {".html", ".htm"}]
-    done_second = set(pd.read_csv(second_pass_path)["record_id"].astype(str)) if second_pass_path.exists() else set()
+    done_second: set[str] = set()
+    df_second = _safe_read_csv(second_pass_path)
+    if not df_second.empty and "record_id" in df_second.columns:
+        done_second = set(df_second["record_id"].astype(str))
     meta = candidate_df.set_index("record_id", drop=False)
     for idx, path in enumerate(html_files, start=1):
         record_id = path.stem.split("_")[0]
@@ -314,7 +382,7 @@ def main() -> None:
         if idx % 50 == 0:
             chunk = pd.DataFrame(second_rows)
             if second_pass_path.exists():
-                out = pd.concat([pd.read_csv(second_pass_path), chunk], ignore_index=True)
+                out = pd.concat([_safe_read_csv(second_pass_path), chunk], ignore_index=True)
             else:
                 out = chunk
             out = out.drop_duplicates(subset=["record_id"], keep="last")
@@ -322,7 +390,7 @@ def main() -> None:
             second_rows = []
     if second_rows:
         if second_pass_path.exists():
-            out = pd.concat([pd.read_csv(second_pass_path), pd.DataFrame(second_rows)], ignore_index=True)
+            out = pd.concat([_safe_read_csv(second_pass_path), pd.DataFrame(second_rows)], ignore_index=True)
         else:
             out = pd.DataFrame(second_rows)
         out = out.drop_duplicates(subset=["record_id"], keep="last")

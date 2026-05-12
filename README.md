@@ -48,6 +48,32 @@ py -3.13 .\scripts\run_keyword_harvest_no_dedup.py --output-root "<output folder
 py -3.13 .\scripts\continue_download_and_dedup.py --run-root "<run folder>" --retry-failed
 ```
 
+## New in v0.2.0 — Institutional & browser-assisted download
+
+- **Institutional resolver** (`--institutional`): Uses `requests.Session` to follow
+  DOI → publisher redirects and extract PDF links from landing pages, leveraging
+  your local network entitlements (campus IP, VPN, proxy).
+- **Browser-assisted download** (`--browser-assisted`): Uses Playwright to open
+  publisher pages in a real browser with your existing login session.
+- **Fine-grained statuses**: 19 DownloadStatus values for precise Agent-readable
+  download reporting.
+- **Structured output**: `download_status.jsonl`, `download_summary.json`,
+  `manual_download_queue.csv`, `failed_downloads.csv`.
+- **Ingest hook**: Post-download PDF verification, SHA-256, dedup, and KB ingest
+  interface (stub).
+
+### Quick start with new CLI
+
+```bash
+pip install -e .
+python -m literature_harvest harvest "fermented cinnamon residue" --limit 20 --download --institutional
+```
+
+### Compliance
+
+This tool **only** uses locally available, legitimate access rights. See
+[SKILL.md](./SKILL.md) for the full compliance principles.
+
 ## License
 
 This repository is released under the [MIT License](./LICENSE).

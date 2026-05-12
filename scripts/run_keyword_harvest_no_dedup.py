@@ -163,7 +163,10 @@ def build_candidate_rows(raw_df: pd.DataFrame, config: dict[str, Any], utils: An
     return pd.DataFrame(rows)
 
 
-def run_downloads(candidate_df: pd.DataFrame, run_root: Path, utils: Any, downloader: Any, config: dict[str, Any]) -> pd.DataFrame:
+def run_downloads(candidate_df: pd.DataFrame, run_root: Path, utils: Any, downloader: Any, config: dict[str, Any],
+                  institutional: bool = False, browser_assisted: bool = False,
+                  browser_profile_dir: str | None = None, headless: bool = True,
+                  publisher_delay: float = 1.0) -> pd.DataFrame:
     pdf_dir = run_root / "downloaded_pdfs"
     log_dir = run_root / "download_logs"
     pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +176,15 @@ def run_downloads(candidate_df: pd.DataFrame, run_root: Path, utils: Any, downlo
     timeout_seconds = int(config.get("download", {}).get("timeout_seconds", 30))
     max_attempts = int(config.get("download", {}).get("max_attempts_per_record", 3))
     delay_seconds = float(config.get("delay_seconds", {}).get("download", 0.2))
+
+    # Import new modules if institutional/browser mode is enabled
+    institutional_resolver = None
+    if institutional:
+        try:
+            from literature_harvest.institutional_resolver import InstitutionalResolver  # noqa: WPS433
+            institutional_resolver = InstitutionalResolver(timeout=timeout_seconds, delay=publisher_delay)
+        except ImportError:
+            print("Warning: literature_harvest package not found; institutional resolver disabled")
 
     existing_log = pd.read_csv(log_path) if log_path.exists() else pd.DataFrame()
     processed = set(existing_log.get("record_id", pd.Series(dtype=str)).astype(str))
@@ -239,6 +251,70 @@ def run_downloads(candidate_df: pd.DataFrame, run_root: Path, utils: Any, downlo
             finally:
                 time.sleep(delay_seconds)
 
+        # ── Institutional resolver fallback ──────────────────────
+        if status != "success" and institutional_resolver is not None:
+            doi = utils.normalize_doi(row.get("doi"))
+            if doi:
+                resolve_result = institutional_resolver.resolve(doi, {"title": row.get("title")})
+                if resolve_result.selected_pdf_url and resolve_result.status in (
+                    "oa_pdf_downloaded", "institution_pdf_downloaded",
+                ):
+                    try:
+                        dl_response = downloader.attempt_download(resolve_result.selected_pdf_url, timeout_seconds)
+                        if dl_response["payload"].startswith(b"%PDF"):
+                            output = pdf_dir / f"{row['record_id']}_{utils.stable_file_stem(row)}_institutional.pdf"
+                            output.write_bytes(dl_response["payload"])
+                            status = "institution_pdf_downloaded"
+                            reason = "institutional_resolver"
+                            final_path = str(output)
+                            final_url = resolve_result.selected_pdf_url
+                            access_route = "institutional"
+                            content_format = "pdf"
+                    except Exception:
+                        pass
+                if status.startswith("institution_") or resolve_result.status == "institution_login_required":
+                    reason = resolve_result.reason or reason
+
+        # ── Browser-assisted fallback ────────────────────────────
+        if status != "success" and browser_assisted:
+            doi = utils.normalize_doi(row.get("doi"))
+            if doi:
+                try:
+                    from literature_harvest.browser_downloader import BrowserDownloader  # noqa: WPS433
+                    browser = BrowserDownloader(timeout=timeout_seconds)
+                    br_result = browser.download(
+                        doi=doi,
+                        landing_url=row.get("landing_page_url", ""),
+                        profile_dir=browser_profile_dir,
+                        headless=headless,
+                        output_dir=str(pdf_dir / "browser_downloads"),
+                    )
+                    if br_result.download_status == "browser_pdf_downloaded":
+                        status = "browser_pdf_downloaded"
+                        reason = "browser_assisted"
+                        final_path = br_result.final_pdf_path
+                        final_url = br_result.final_pdf_url
+                        access_route = "browser"
+                        content_format = "pdf"
+                except ImportError:
+                    pass  # Playwright not installed
+                except Exception:
+                    pass
+
+        # Map legacy status to new DownloadStatus for the output row
+        download_status = status
+        if status == "success":
+            if content_format == "pdf":
+                download_status = "oa_pdf_downloaded"
+            elif content_format == "html":
+                download_status = "html_saved"
+            elif content_format == "xml":
+                download_status = "xml_saved"
+        elif status == "inaccessible":
+            download_status = "paywall_detected_no_entitlement"
+        elif status == "broken_link":
+            download_status = "broken_link"
+
         rows.append(
             {
                 "record_id": row["record_id"],
@@ -246,7 +322,7 @@ def run_downloads(candidate_df: pd.DataFrame, run_root: Path, utils: Any, downlo
                 "title": row.get("title"),
                 "final_pdf_path": final_path,
                 "final_pdf_url": final_url,
-                "download_status": status,
+                "download_status": download_status,
                 "failure_reason": reason,
                 "access_route_used": access_route,
                 "content_format": content_format,
@@ -270,7 +346,58 @@ def run_downloads(candidate_df: pd.DataFrame, run_root: Path, utils: Any, downlo
     if not combined.empty:
         combined = combined.drop_duplicates(subset=["record_id"], keep="last")
     combined.to_csv(log_path, index=False, encoding="utf-8-sig")
+
+    # ── Write structured output files ──────────────────────────
+    _write_structured_outputs(run_root, rows)
     return combined
+
+
+def _write_structured_outputs(run_root: Path, rows: list[dict[str, Any]]) -> None:
+    """Write JSONL and summary files for Agent consumption."""
+    import json as _json
+
+    # download_status.jsonl
+    status_path = run_root / "download_status.jsonl"
+    if rows:
+        with status_path.open("w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(_json.dumps(r, ensure_ascii=False) + "\n")
+
+    # manual_download_queue.csv
+    manual = [r for r in rows if r.get("download_status") in (
+        "manual_download_required", "paywall_detected_no_entitlement",
+        "institution_login_required",
+    )]
+    if manual:
+        import csv
+        queue_path = run_root / "manual_download_queue.csv"
+        manual_fields = ["title", "doi", "download_status", "failure_reason", "access_route_used", "final_pdf_url"]
+        with queue_path.open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=manual_fields)
+            w.writeheader()
+            for r in manual:
+                w.writerow({k: r.get(k, "") for k in manual_fields})
+
+    # download_summary.json
+    from literature_harvest.status import DownloadStatus as DS
+    summary = {
+        "total_candidates": len(rows),
+        "oa_pdf_downloaded": sum(1 for r in rows if r.get("download_status") == DS.OA_PDF_DOWNLOADED.value),
+        "institution_pdf_downloaded": sum(1 for r in rows if r.get("download_status") == DS.INSTITUTION_PDF_DOWNLOADED.value),
+        "browser_pdf_downloaded": sum(1 for r in rows if r.get("download_status") == DS.BROWSER_PDF_DOWNLOADED.value),
+        "html_saved": sum(1 for r in rows if r.get("download_status") == DS.HTML_SAVED.value),
+        "xml_saved": sum(1 for r in rows if r.get("download_status") == DS.XML_SAVED.value),
+        "manual_download_required": sum(1 for r in rows if r.get("download_status") == DS.MANUAL_DOWNLOAD_REQUIRED.value),
+        "failed": sum(1 for r in rows if r.get("download_status") in (
+            DS.DOWNLOAD_FAILED.value, DS.BROKEN_LINK.value, DS.RATE_LIMITED.value,
+            DS.PUBLISHER_BLOCKED.value,
+        )),
+        "duplicates": 0,
+        "ingest_pending": 0,
+    }
+    summary_path = run_root / "download_summary.json"
+    with summary_path.open("w", encoding="utf-8") as f:
+        _json.dump(summary, f, ensure_ascii=False, indent=2)
 
 
 def write_summary(run_root: Path, candidate_df: pd.DataFrame, high_df: pd.DataFrame, medium_df: pd.DataFrame, log_df: pd.DataFrame) -> None:
@@ -299,6 +426,14 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="JSON config path")
     parser.add_argument("--run-name", required=True, help="New run folder name under literature_harvest")
     parser.add_argument("--skip-search", action="store_true")
+    parser.add_argument("--institutional", action="store_true", help="Enable institutional resolver fallback for non-OA papers")
+    parser.add_argument("--browser-assisted", action="store_true", help="Enable Playwright browser-assisted download")
+    parser.add_argument("--browser-profile-dir", default=None, help="Path to persistent browser profile directory")
+    parser.add_argument("--headless", action="store_true", default=True, help="Run browser headless (default: True)")
+    parser.add_argument("--max-institutional-downloads", type=int, default=50, help="Max downloads via institutional route")
+    parser.add_argument("--publisher-delay", type=float, default=1.0, help="Delay between publisher requests (seconds)")
+    parser.add_argument("--rate-limit", type=int, default=3, help="Max requests per second")
+    parser.add_argument("--resume", action="store_true", help="Resume previous run (skip already-downloaded)")
     args = parser.parse_args()
 
     output_root = Path(args.output_root).resolve()
@@ -348,7 +483,14 @@ def main() -> None:
             "looks_paywalled": staticmethod(looks_paywalled),
         },
     )
-    log_df = run_downloads(candidate_df, run_root, utils, downloader, config)
+    log_df = run_downloads(
+        candidate_df, run_root, utils, downloader, config,
+        institutional=args.institutional,
+        browser_assisted=args.browser_assisted,
+        browser_profile_dir=args.browser_profile_dir,
+        headless=args.headless,
+        publisher_delay=args.publisher_delay,
+    )
 
     status = log_df[["record_id", "download_status"]].drop_duplicates("record_id", keep="last")
     candidate_df = candidate_df.drop(columns=["download_status"], errors="ignore").merge(status, on="record_id", how="left")

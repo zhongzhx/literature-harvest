@@ -33,6 +33,15 @@
     "timeout_seconds": 30,
     "max_attempts_per_record": 3
   },
+  "institutional": {
+    "enabled": false,
+    "publisher_delay_seconds": 1.0
+  },
+  "browser_assisted": {
+    "enabled": false,
+    "profile_dir": "",
+    "headless": true
+  },
   "research_article_preference": true,
   "exclude_reviews_by_default": false,
   "include_terms": [
