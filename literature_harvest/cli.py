@@ -82,12 +82,14 @@ def cmd_harvest(args: argparse.Namespace) -> None:
     print()
 
     # ── Step 1: Search all sources ──────────────────────────────
-    from literature_harvest.scripts.harvest_utils import ensure_directories
-    from literature_harvest.scripts.merge_and_deduplicate import load_sources, normalize_columns, deduplicate
     import os
     import tempfile
 
     os.environ["ASPERGILLUS_HARVEST_ROOT"] = str(run_root)
+
+    from literature_harvest.scripts.harvest_utils import ensure_directories
+    from literature_harvest.scripts.merge_and_deduplicate import load_sources, normalize_columns, deduplicate
+
     ensure_directories()
 
     # Build a temporary config that enables all 4 sources
