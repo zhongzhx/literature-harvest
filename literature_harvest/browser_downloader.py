@@ -31,6 +31,13 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+import requests as req
+
+from literature_harvest.access_markers import (
+    _CAPTCHA_MARKERS_RE,
+    _LOGIN_MARKERS_RE,
+    _PAYWALL_MARKERS_RE,
+)
 from literature_harvest.models import DownloadResult
 from literature_harvest.status import (
     BROWSER_PDF_DOWNLOADED,
@@ -61,24 +68,7 @@ _PLAYWRIGHT_NOT_INSTALLED_MSG = (
 )
 
 # ── Access barrier detection (browser context) ────────────────────
-
-_LOGIN_MARKERS = re.compile(
-    r"login|sign[-\s]in|log[-\s]in|institutional.login|shibboleth|"
-    r"openathens|wayfinder|access.through.your.institution"
-    r"|access.via.your.institution",
-    re.IGNORECASE,
-)
-
-_CAPTCHA_MARKERS = re.compile(
-    r"captcha|recaptcha|are.you.a.robot|verify.you.are.human|unusual.traffic",
-    re.IGNORECASE,
-)
-
-_PAYWALL_MARKERS = re.compile(
-    r"subscription.required|purchase.this.article|pay.per.view|add.to.cart|"
-    r"subscribe.to.journal|buy.this.article",
-    re.IGNORECASE,
-)
+# Regex patterns are imported from access_markers
 
 _PDF_URL_PATTERNS = re.compile(
     r"(/pdf/|/doi/pdf/|/epdf/|downloadpdf|article-pdf|"
@@ -121,6 +111,7 @@ class BrowserDownloader:
         profile_dir: Optional[str | Path] = None,
         headless: bool = True,
         output_dir: Optional[str | Path] = None,
+        session: Optional["req.Session"] = None,
     ) -> DownloadResult:
         """Open the publisher page in a browser and attempt to download the PDF.
 
@@ -130,6 +121,8 @@ class BrowserDownloader:
             profile_dir: Path to a persistent browser profile directory.
             headless: Run browser in headless mode (default True).
             output_dir: Directory to save the downloaded PDF (optional).
+            session: Optional ``requests.Session`` for PDF download (preserves
+                institutional cookies/entitlements from prior requests).
 
         Returns:
             A :class:`DownloadResult` with the outcome.
@@ -177,10 +170,10 @@ class BrowserDownloader:
                     result.failure_reason = "no_pdf_found_on_page"
                     return result
 
-                # Download the PDF (via requests to avoid browser download dialog)
-                import requests as req
-
-                resp = req.get(
+                # Download the PDF via the provided session (preserves cookies
+                # from institutional/campus entitlements) or a bare request
+                fetcher: req.Session | Any = session if session is not None else req
+                resp = fetcher.get(
                     pdf_url,
                     headers={"User-Agent": UA},
                     timeout=30,
@@ -221,11 +214,11 @@ class BrowserDownloader:
         Returns a DownloadStatus string if a barrier is detected,
         or an empty string if the page appears accessible.
         """
-        if _CAPTCHA_MARKERS.search(page_text):
+        if _CAPTCHA_MARKERS_RE.search(page_text):
             return CAPTCHA_OR_BOT_CHECK.value
-        if _LOGIN_MARKERS.search(page_text):
+        if _LOGIN_MARKERS_RE.search(page_text):
             return INSTITUTION_LOGIN_REQUIRED.value
-        if _PAYWALL_MARKERS.search(page_text):
+        if _PAYWALL_MARKERS_RE.search(page_text):
             return PAYWALL_DETECTED_NO_ENTITLEMENT.value
         return ""
 

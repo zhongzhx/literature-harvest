@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from harvest_utils import (
+from literature_harvest.scripts.harvest_utils import (
     MERGED_DIR,
     RAW_DIR,
     clean_text,

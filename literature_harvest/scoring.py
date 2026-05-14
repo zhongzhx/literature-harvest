@@ -67,6 +67,16 @@ class LLMScorer:
                 "Set it via environment variable or pass api_key= to LLMScorer."
             )
 
+        try:
+            import anthropic
+        except ImportError:
+            raise ImportError(
+                "The 'anthropic' package is required for LLM scoring.\n"
+                "Install it with: pip install anthropic"
+            ) from None
+
+        self._client = anthropic.Anthropic(api_key=self.api_key)
+
     def score(
         self,
         title: str,
@@ -130,18 +140,9 @@ class LLMScorer:
 
     def _call_api(self, prompt: str) -> str:
         """Call the Anthropic API and return the raw response text."""
-        try:
-            import anthropic
-        except ImportError:
-            raise ImportError(
-                "The 'anthropic' package is required for LLM scoring.\n"
-                "Install it with: pip install anthropic"
-            ) from None
-
-        client = anthropic.Anthropic(api_key=self.api_key)
-        message = client.messages.create(
+        message = self._client.messages.create(
             model=self.model,
-            max_tokens=32,
+            max_tokens=64,
             temperature=0.0,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -151,7 +152,25 @@ class LLMScorer:
     def _parse_score(raw: str) -> int:
         """Extract an integer score from the LLM response."""
         cleaned = raw.strip()
-        # Try to find a number in the response
+        # Guard: if the response is suspiciously long, it's likely an error
+        if len(cleaned) > 20:
+            # Try to extract a score from the first token only
+            first_token = cleaned.split()[0] if cleaned.split() else cleaned
+            try:
+                val = int(first_token)
+                if 0 <= val <= 100:
+                    return val
+            except ValueError:
+                pass
+            return 0
+        # Try direct integer parse for clean responses
+        try:
+            val = int(cleaned)
+            if 0 <= val <= 100:
+                return val
+        except ValueError:
+            pass
+        # Fall back to regex
         numbers = re.findall(r"\b(\d{1,3})\b", cleaned)
         for num in numbers:
             val = int(num)

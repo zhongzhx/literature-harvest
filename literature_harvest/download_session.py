@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import requests
 
+from literature_harvest.access_markers import looks_paywalled
 from literature_harvest.status import (
     BROKEN_LINK,
     DOWNLOADED_BUT_NOT_PARSEABLE,
@@ -38,22 +39,6 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
-
-PAYWALL_MARKERS = [
-    "subscription required",
-    "purchase this article",
-    "buy this article",
-    "access through your institution",
-    "institutional access",
-    "paywall",
-    "pay per view",
-    "pay-per-view",
-    "subscribe to journal",
-    "subscribe to this journal",
-    "purchase pdf",
-    "rent this article",
-    "add to cart",
-]
 
 
 class DownloadSession:
@@ -150,8 +135,7 @@ class DownloadSession:
 
     def looks_paywalled(self, text: str) -> bool:
         """Check if *text* contains paywall markers."""
-        lowered = text.lower()
-        return any(marker in lowered for marker in PAYWALL_MARKERS)
+        return looks_paywalled(text)
 
     def check_pdf_magic(self, path: str | Path) -> bool:
         """Verify that a file starts with ``%PDF``."""

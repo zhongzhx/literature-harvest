@@ -84,10 +84,10 @@ def cmd_harvest(args: argparse.Namespace) -> None:
     # ── Step 1: Search all sources ──────────────────────────────
     from literature_harvest.scripts.harvest_utils import ensure_directories
     from literature_harvest.scripts.merge_and_deduplicate import load_sources, normalize_columns, deduplicate
-    import os as _os
+    import os
     import tempfile
 
-    _os.environ["ASPERGILLUS_HARVEST_ROOT"] = str(run_root)
+    os.environ["ASPERGILLUS_HARVEST_ROOT"] = str(run_root)
     ensure_directories()
 
     # Build a temporary config that enables all 4 sources
@@ -129,7 +129,9 @@ def cmd_harvest(args: argparse.Namespace) -> None:
         ],
     }
 
-    tmp_config = Path(tempfile.mktemp(suffix=".json"))
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json")
+    tmp_config = Path(tmp_path)
+    os.close(tmp_fd)
     try:
         _write_json(tmp_config, config)
         config_path = str(tmp_config)
@@ -349,8 +351,9 @@ def cmd_harvest(args: argparse.Namespace) -> None:
                     doi=doi,
                     landing_url=landing,
                     profile_dir=args.browser_profile_dir,
-                    headless=not args.headless,
+                    headless=not args.show_browser,
                     output_dir=str(pdf_dir),
+                    session=downloader.session,
                 )
                 if DownloadStatus.is_pdf_success(br_result.download_status):
                     dr.download_status = br_result.download_status
@@ -466,6 +469,7 @@ def cmd_harvest(args: argparse.Namespace) -> None:
 def cmd_resume(args: argparse.Namespace) -> None:
     """Resume downloads from a previous harvest run."""
     from literature_harvest.download_session import DownloadSession
+    from literature_harvest.ingest_hook import process_downloaded_paper
     from literature_harvest.institutional_resolver import InstitutionalResolver
 
     run_root = Path(args.run_root).resolve()
@@ -482,6 +486,14 @@ def cmd_resume(args: argparse.Namespace) -> None:
                 if line:
                     existing.append(json.loads(line))
 
+    existing_ids = {r.get("record_id") for r in existing
+                    if DownloadStatus.is_success(r.get("download_status", ""))
+                    or (args.retry_failed and not DownloadStatus.is_success(r.get("download_status", "")))}
+    # If retry_failed, also exclude previously failed items from blocking retry
+    if args.retry_failed:
+        existing_ids = {r.get("record_id") for r in existing
+                        if DownloadStatus.is_pdf_success(r.get("download_status", ""))}
+
     # Load candidates
     candidates_path = run_root / "harvest_candidates.jsonl"
     if not candidates_path.is_file():
@@ -496,30 +508,118 @@ def cmd_resume(args: argparse.Namespace) -> None:
                 candidates.append(json.loads(line))
 
     # Find candidates that need download
-    existing_ids = {r.get("record_id") for r in existing
-                    if DownloadStatus.is_success(r.get("download_status", ""))}
     pending = [c for c in candidates if c.get("id", c.get("record_id", "")) not in existing_ids]
+    to_process = pending[:args.limit] if args.limit else pending
 
-    print(f"Resuming: {len(pending)} papers pending out of {len(candidates)} total")
+    print(f"Resuming: {len(to_process)} papers to download out of {len(candidates)} total")
 
     downloader = DownloadSession()
-    resolver = InstitutionalResolver() if args.institutional else None
+    resolver = InstitutionalResolver(session=downloader.session) if args.institutional else None
 
-    for idx, candidate in enumerate(pending[:args.limit] if args.limit else pending, start=1):
-        doi = candidate.get("doi", "")
-        title = candidate.get("title", "")
-        print(f"  [{idx}/{len(pending)}] {title[:60]}... ", end="", flush=True)
+    # Initialise browser once
+    browser_downloader = None
+    if args.browser_assisted:
+        try:
+            from literature_harvest.browser_downloader import BrowserDownloader
+            browser_downloader = BrowserDownloader()
+            print("Browser: Playwright ready")
+        except ImportError:
+            print("Browser: Playwright not installed (skipping)")
 
-        dl = downloader.download_to_file(
-            candidate.get("pdf_url", "") or candidate.get("fulltext_url", "") or
-            candidate.get("landing_page_url", ""),
-            pdf_dir / f"resume_{idx:06d}",
+    for idx, candidate in enumerate(to_process, start=1):
+        doi = str(candidate.get("doi", "") or "")
+        title = str(candidate.get("title", "") or "")
+        url = str(candidate.get("pdf_url", "") or candidate.get("fulltext_url", "") or "")
+        landing = str(candidate.get("landing_page_url", "") or "")
+        print(f"  [{idx}/{len(to_process)}] {title[:60]}... ", end="", flush=True)
+
+        dr = DownloadResult(
+            record_id=f"resume-{idx:06d}",
+            doi=doi,
+            title=title,
         )
+        downloaded = False
 
-        if DownloadStatus.is_success(dl["status"]):
-            print(f"Downloaded as {dl['content_format']}")
-        else:
-            print(f"Failed: {dl['reason']}")
+        # 1: OA download
+        oa_urls = [u for u in [url, landing] if u.startswith("http")]
+        for oa_url in oa_urls:
+            out_path = pdf_dir / f"resume_{idx:06d}"
+            dl_result = downloader.download_to_file(oa_url, out_path)
+            status = dl_result["status"]
+            if DownloadStatus.is_pdf_success(status):
+                dr.download_status = status
+                dr.final_pdf_path = dl_result["path"]
+                dr.final_pdf_url = dl_result["url"]
+                dr.content_format = "pdf"
+                dr.access_route = "oa"
+                downloaded = True
+                print("✓ OA PDF")
+                break
+            elif DownloadStatus.is_success(status):
+                dr.download_status = status
+                dr.final_pdf_path = dl_result["path"]
+                dr.final_pdf_url = dl_result["url"]
+                dr.content_format = dl_result["content_format"]
+                dr.access_route = "oa"
+
+        # 2: Institutional resolver
+        if not downloaded and doi and resolver:
+            resolve_result = resolver.resolve(doi, {"title": title})
+            if resolve_result.status in ("oa_pdf_downloaded", "institution_pdf_downloaded"):
+                if resolve_result.payload:
+                    out_path = pdf_dir / f"resume_{idx:06d}.pdf"
+                    out_path.write_bytes(resolve_result.payload)
+                    if downloader.check_pdf_magic(out_path):
+                        dr.download_status = resolve_result.status
+                        dr.final_pdf_path = str(out_path.resolve())
+                        dr.final_pdf_url = resolve_result.selected_pdf_url
+                        dr.content_format = "pdf"
+                        dr.access_route = "institutional"
+                        dr.publisher = resolve_result.publisher
+                        downloaded = True
+                        print("✓ Institutional PDF")
+            elif not downloaded:
+                dr.download_status = resolve_result.status
+                dr.failure_reason = resolve_result.reason
+
+        # 3: Browser-assisted
+        if not downloaded and browser_downloader is not None and doi:
+            try:
+                br_result = browser_downloader.download(
+                    doi=doi,
+                    landing_url=landing,
+                    profile_dir=args.browser_profile_dir,
+                    headless=not args.show_browser,
+                    output_dir=str(pdf_dir),
+                    session=downloader.session,
+                )
+                if DownloadStatus.is_pdf_success(br_result.download_status):
+                    dr.download_status = br_result.download_status
+                    dr.final_pdf_path = br_result.final_pdf_path
+                    dr.final_pdf_url = br_result.final_pdf_url
+                    dr.content_format = "pdf"
+                    dr.access_route = "browser"
+                    downloaded = True
+                    print("✓ Browser PDF")
+                else:
+                    dr.download_status = br_result.download_status
+                    dr.failure_reason = br_result.failure_reason
+                    print(f"Browser: {br_result.failure_reason[:40]}")
+            except ImportError:
+                print("Browser: Playwright not installed (skipping)")
+            except Exception as exc:
+                dr.download_status = "download_failed"
+                dr.failure_reason = str(exc)
+                print(f"Browser error: {str(exc)[:40]}")
+
+        if not downloaded:
+            print(f"Failed: {dr.failure_reason or 'no_auto_download_route'}")
+
+        if DownloadStatus.is_pdf_success(dr.download_status):
+            process_downloaded_paper(
+                {"record_id": dr.record_id, "doi": doi, "title": title, "path": dr.final_pdf_path},
+                str(run_root),
+            )
 
     downloader.close()
 
@@ -580,8 +680,8 @@ def main() -> None:
                     help="Enable Playwright browser-assisted download")
     hp.add_argument("--browser-profile-dir", default=None,
                     help="Path to persistent browser profile directory")
-    hp.add_argument("--headless", action="store_true", default=True,
-                    help="Run browser headless (default: True)")
+    hp.add_argument("--show-browser", action="store_true",
+                    help="Show browser window during download (default: headless)")
     hp.add_argument("--output-root", default=None, help="Output root directory")
     hp.add_argument("--run-name", default=None, help="Run folder name")
     hp.add_argument("--papers-file", default=None,
@@ -597,6 +697,12 @@ def main() -> None:
                     help="Retry previously failed downloads")
     rp.add_argument("--institutional", action="store_true",
                     help="Enable institutional resolver fallback")
+    rp.add_argument("--browser-assisted", action="store_true",
+                    help="Enable Playwright browser-assisted download")
+    rp.add_argument("--browser-profile-dir", default=None,
+                    help="Path to persistent browser profile directory")
+    rp.add_argument("--show-browser", action="store_true",
+                    help="Show browser window during download")
     rp.add_argument("--limit", type=int, default=None, help="Max records to process")
     rp.set_defaults(func=cmd_resume)
 

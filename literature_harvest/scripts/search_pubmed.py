@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 import pandas as pd
 
-from harvest_utils import (
+from literature_harvest.scripts.harvest_utils import (
     NCBI_BASE,
     RAW_DIR,
     chunked,

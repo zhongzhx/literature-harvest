@@ -24,6 +24,11 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from literature_harvest.access_markers import (
+    CAPTCHA_MARKERS,
+    LOGIN_MARKERS,
+    PAYWALL_MARKERS,
+)
 from literature_harvest.models import InstitutionalResolveResult
 from literature_harvest.status import (
     BROKEN_LINK,
@@ -48,41 +53,6 @@ USER_AGENT = (
 
 DEFAULT_TIMEOUT = 45
 DEFAULT_DELAY = 0.5
-
-# Access-barrier markers that indicate a login/SSO wall
-_LOGIN_MARKERS: list[str] = [
-    "login",
-    "sign in",
-    "sign-in",
-    "log in",
-    "institutional login",
-    "access through your institution",
-    "access via your institution",
-    "shibboleth",
-    "saml",
-    "openathens",
-    "wayfinder",
-]
-
-_CAPTCHA_MARKERS: list[str] = [
-    "captcha",
-    "recaptcha",
-    "are you a robot",
-    "verify you are human",
-    "unusual traffic",
-]
-
-_PAYWALL_MARKERS: list[str] = [
-    "subscription required",
-    "purchase this article",
-    "buy this article",
-    "purchase pdf",
-    "subscribe to this journal",
-    "subscribe to journal",
-    "pay per view",
-    "pay-per-view",
-    "add to cart",
-]
 
 # Known PDF URL patterns (path-based heuristic)
 _PDF_PATH_PATTERNS: list[re.Pattern] = [
@@ -190,18 +160,17 @@ class InstitutionalResolver:
 
         # Step 1: resolve DOI → follow redirects → landing page
         doi_url = f"https://doi.org/{normalised}"
-        resolve_result = self._follow_doi(doi_url)
-        if resolve_result is not None:
-            return resolve_result  # fatal error
+        ok, result_or_data = self._follow_doi(doi_url)
+        if not ok:
+            return result_or_data  # fatal error result
 
-        landing_url = self._last_url or doi_url
-        redirect_chain = self._redirect_chain
+        landing_url, redirect_chain, html = result_or_data
 
         # Step 2: detect publisher
         publisher = self._detect_publisher(landing_url)
 
         # Step 3: check for access barriers
-        markers = self._detect_access_barriers(self._html, landing_url)
+        markers = self._detect_access_barriers(html, landing_url)
         if markers:
             status = self._classify_barrier(markers)
             if status in (CAPTCHA_OR_BOT_CHECK, PUBLISHER_BLOCKED):
@@ -216,7 +185,7 @@ class InstitutionalResolver:
                 )
 
         # Step 4: extract PDF candidates
-        pdf_candidates = self._extract_pdf_urls(self._html, landing_url)
+        pdf_candidates = self._extract_pdf_urls(html, landing_url)
 
         # Step 5: if markers indicate login/paywall but we still found no PDF
         if not pdf_candidates and markers:
@@ -267,14 +236,16 @@ class InstitutionalResolver:
     # DOI resolution
     # ------------------------------------------------------------------
 
-    def _follow_doi(self, doi_url: str) -> Optional[InstitutionalResolveResult]:
+    def _follow_doi(
+        self, doi_url: str,
+    ) -> tuple[bool, Any]:
         """Follow DOI redirects and capture the landing page.
 
-        Returns an error result if the resolution fails fatally.
+        Returns ``(True, (landing_url, redirect_chain, html))`` on success
+        or ``(False, InstitutionalResolveResult)`` on fatal error.
         """
-        self._redirect_chain = [doi_url]
-        self._html = ""
-        self._last_url = doi_url
+        redirect_chain = [doi_url]
+        last_url = doi_url
 
         try:
             resp = self.session.get(
@@ -283,52 +254,51 @@ class InstitutionalResolver:
                 allow_redirects=True,
                 headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
             )
-            # Record the full redirect chain
             if resp.history:
-                self._redirect_chain = [r.url for r in resp.history] + [resp.url]
-            self._last_url = resp.url
-            self._html = resp.text
+                redirect_chain = [r.url for r in resp.history] + [resp.url]
+            last_url = resp.url
+            html = resp.text
 
             if resp.status_code == 429:
-                return InstitutionalResolveResult(
+                return False, InstitutionalResolveResult(
                     doi=doi_url, status=RATE_LIMITED.value,
                     reason="http_429_rate_limited",
-                    redirect_chain=self._redirect_chain,
+                    redirect_chain=redirect_chain,
                 )
             if resp.status_code in (404, 410):
-                return InstitutionalResolveResult(
+                return False, InstitutionalResolveResult(
                     doi=doi_url, status=BROKEN_LINK.value,
                     reason=f"http_{resp.status_code}",
-                    redirect_chain=self._redirect_chain,
+                    redirect_chain=redirect_chain,
                 )
             if resp.status_code in (401, 403):
-                return InstitutionalResolveResult(
+                return False, InstitutionalResolveResult(
                     doi=doi_url, status=PUBLISHER_BLOCKED.value,
                     reason=f"http_{resp.status_code}",
-                    redirect_chain=self._redirect_chain,
+                    redirect_chain=redirect_chain,
                 )
             if resp.status_code >= 400:
-                return InstitutionalResolveResult(
+                return False, InstitutionalResolveResult(
                     doi=doi_url, status=DOWNLOAD_FAILED.value,
                     reason=f"http_{resp.status_code}",
-                    redirect_chain=self._redirect_chain,
+                    redirect_chain=redirect_chain,
                 )
 
             time.sleep(self.delay)
-            return None
+            return True, (last_url, redirect_chain, html)
 
         except requests.exceptions.Timeout:
-            return InstitutionalResolveResult(
+            return False, InstitutionalResolveResult(
                 doi=doi_url, status=DOWNLOAD_FAILED.value,
                 reason="timeout",
             )
         except requests.exceptions.ConnectionError:
-            return InstitutionalResolveResult(
+            return False, InstitutionalResolveResult(
                 doi=doi_url, status=DOWNLOAD_FAILED.value,
                 reason="connection_error",
             )
         except requests.exceptions.RequestException as exc:
-            return InstitutionalResolveResult(
+            return False, InstitutionalResolveResult(
                 doi=doi_url, status=DOWNLOAD_FAILED.value,
                 reason=f"request_failed: {exc}",
             )
@@ -390,17 +360,17 @@ class InstitutionalResolver:
         markers: list[str] = []
         text_lower = html.lower()
 
-        for marker in _LOGIN_MARKERS:
-            if marker in text_lower:
-                markers.append(marker)
-                break  # one login marker is enough
-
-        for marker in _CAPTCHA_MARKERS:
+        for marker in LOGIN_MARKERS:
             if marker in text_lower:
                 markers.append(marker)
                 break
 
-        for marker in _PAYWALL_MARKERS:
+        for marker in CAPTCHA_MARKERS:
+            if marker in text_lower:
+                markers.append(marker)
+                break
+
+        for marker in PAYWALL_MARKERS:
             if marker in text_lower:
                 markers.append(marker)
                 break
@@ -410,13 +380,13 @@ class InstitutionalResolver:
     def _classify_barrier(self, markers: list[str]) -> str:
         """Determine the DownloadStatus based on detected markers."""
         marker_text = " ".join(markers).lower()
-        for m in _CAPTCHA_MARKERS:
+        for m in CAPTCHA_MARKERS:
             if m in marker_text:
                 return CAPTCHA_OR_BOT_CHECK
-        for m in _LOGIN_MARKERS:
+        for m in LOGIN_MARKERS:
             if m in marker_text:
                 return INSTITUTION_LOGIN_REQUIRED
-        for m in _PAYWALL_MARKERS:
+        for m in PAYWALL_MARKERS:
             if m in marker_text:
                 return PAYWALL_DETECTED_NO_ENTITLEMENT
         return MANUAL_DOWNLOAD_REQUIRED
@@ -479,11 +449,4 @@ class InstitutionalResolver:
                 return name
         return ""
 
-    @staticmethod
-    def _normalise_url(url: str, base: str) -> str:
-        """Resolve a possibly-relative URL to absolute."""
-        if url.startswith("//"):
-            # Protocol-relative
-            parsed = requests.utils.urlparse(base)
-            return f"{parsed.scheme}:{url}"
-        return urljoin(base, url)
+    # _normalise_url removed — was dead code, use urljoin directly instead

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from harvest_utils import (
+from literature_harvest.scripts.harvest_utils import (
     LOG_DIR,
     MERGED_DIR,
     PDF_DIR,

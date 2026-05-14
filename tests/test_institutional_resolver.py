@@ -72,7 +72,8 @@ class TestInstitutionalResolver(unittest.TestCase):
         """Login form markers are detected."""
         html = "<html><body>Please log in through your institution to access this content</body></html>"
         markers = self.resolver._detect_access_barriers(html, "https://example.com")
-        self.assertTrue(any("login" in m for m in markers))
+        self.assertTrue(len(markers) > 0)
+        self.assertIn(markers[0], ["login", "log in"])
 
     def test_detect_access_barriers_paywall(self):
         """Paywall markers are detected."""

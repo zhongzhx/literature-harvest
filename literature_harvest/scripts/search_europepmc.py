@@ -5,7 +5,7 @@ import math
 
 import pandas as pd
 
-from harvest_utils import (
+from literature_harvest.scripts.harvest_utils import (
     EUROPEPMC_SEARCH_URL,
     RAW_DIR,
     clean_text,
