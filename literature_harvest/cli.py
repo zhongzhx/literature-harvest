@@ -674,7 +674,7 @@ def main() -> None:
     # harvest
     hp = sub.add_parser("harvest", help="Run a full harvest (search + download + report)")
     hp.add_argument("query", help="Search query")
-    hp.add_argument("--limit", type=int, default=50, help="Max records per source (default 50)")
+    hp.add_argument("--limit", type=int, default=5000, help="Max records per source (default 5000)")
     hp.add_argument("--download", action="store_true", help="Enable download")
     hp.add_argument("--institutional", action="store_true",
                     help="Enable institutional resolver fallback")
