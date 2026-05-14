@@ -68,7 +68,8 @@ The Agent (Claude) drives the workflow in two passes:
 
 ```bash
 # 1. Search all sources, output candidates CSV (no download)
-python -m literature_harvest harvest "RAW264.7 inflammation" --limit 300 --score-only
+#    Use --limit to control how many papers to fetch per source (default 5000).
+python -m literature_harvest harvest "your search query" --score-only
 
 # 2. Agent reads harvest_candidates.csv and scores each paper's relevance
 #    to the user's topic (0-100) based on title + abstract.
@@ -80,7 +81,7 @@ python -m literature_harvest harvest "RAW264.7 inflammation" --limit 300 --score
 
 ```bash
 # 3. Download papers from highest score to lowest
-python -m literature_harvest harvest "RAW264.7 inflammation" \
+python -m literature_harvest harvest "your search query" \
     --papers-file ./scoring_table.csv \
     --download --institutional
 
@@ -94,13 +95,13 @@ python -m literature_harvest harvest "RAW264.7 inflammation" \
 
 ```bash
 # Basic harvest (search + download OA, no scoring)
-python -m literature_harvest harvest "fermented cinnamon residue immunomodulation" --limit 50 --download
+python -m literature_harvest harvest "your search query" --download
 
 # With institutional resolver
-python -m literature_harvest harvest "fermented cinnamon residue immunomodulation" --limit 50 --download --institutional
+python -m literature_harvest harvest "your search query" --download --institutional
 
 # With browser-assisted download
-python -m literature_harvest harvest "fermented cinnamon residue immunomodulation" --limit 50 --download --institutional --browser-assisted --browser-profile-dir ./browser_profile --headless false
+python -m literature_harvest harvest "your search query" --download --institutional --browser-assisted --browser-profile-dir ./browser_profile --show-browser
 
 # Resume a previous run
 python -m literature_harvest resume --run-root ./harvest_output/run_12345
